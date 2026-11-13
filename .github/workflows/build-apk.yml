@@ -1,0 +1,86 @@
+name: Construire l'APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Décompresser le projet (project.zip)
+        run: unzip -o project.zip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Installer le SDK Android
+        uses: android-actions/setup-android@v3
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Créer le projet Android (Capacitor)
+        run: npx cap add android
+
+      - name: Adapter le projet (caméra, icônes, version)
+        run: python3 scripts/patch_android.py
+        env:
+          VERSION_NAME: "1.0.${{ github.run_number }}"
+          VERSION_CODE: ${{ github.run_number }}
+
+      - name: Synchroniser l'application web
+        run: npx cap sync android
+
+      - name: Clé de signature (la même à chaque build, pour pouvoir mettre à jour)
+        run: |
+          mkdir -p ~/.android
+          cp keystore/debug.keystore ~/.android/debug.keystore
+
+      - name: Compiler l'APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Préparer le fichier
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/PhotoID-HD.apk
+          ls -la out
+
+      - name: Garder l'APK dans l'exécution du workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoID-HD-apk
+          path: out/PhotoID-HD.apk
+
+      - name: Publier dans « Releases »
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh release create "$GITHUB_REF_NAME" out/PhotoID-HD.apk \
+              --title "Photo ID HD $GITHUB_REF_NAME" \
+              --notes "APK à installer sur Android (autorisez les sources inconnues)."
+          else
+            gh release delete latest --cleanup-tag -y || true
+            gh release create latest out/PhotoID-HD.apk \
+              --title "Photo ID HD — dernière version" \
+              --notes "Dernier APK construit automatiquement (build n°${{ github.run_number }}). À installer sur Android (autorisez les sources inconnues)." \
+              --prerelease
+          fi
